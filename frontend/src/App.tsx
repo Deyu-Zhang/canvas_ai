@@ -22,22 +22,6 @@ interface SessionInfo {
   username: string;
 }
 
-interface IndexStatus {
-  status: string;
-  index_status: string;
-  message: string;
-  details?: {
-    canvas_courses: number;
-    canvas_files_total: number;
-    indexed_files_total: number;
-    missing_files_count: number;
-    extra_files_count: number;
-    vector_stores_count: number;
-    has_local_index: boolean;
-    missing_by_course: { [key: string]: number };
-    missing_files_sample: string[];
-  };
-}
 
 function App() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -46,9 +30,6 @@ function App() {
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [showExamples, setShowExamples] = useState(false);
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
-  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
-  const [showSyncDialog, setShowSyncDialog] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   
   // 动态获取 API 地址，支持 localhost 和 localtunnel
@@ -63,81 +44,6 @@ function App() {
     scrollToBottom();
   }, [messages]);
 
-  // 检查索引状态
-  const checkIndexStatus = async () => {
-    try {
-      const response = await fetch(`${API_BASE}/api/check-index-status`);
-      const data = await response.json();
-      
-      if (data.status === 'success') {
-        setIndexStatus(data);
-        
-        // 如果是第一次使用或需要更新，显示对话框
-        if (data.index_status === 'no_index' || data.index_status === 'partial_index') {
-          setShowSyncDialog(true);
-        }
-      } else {
-        console.error('[INDEX] Check failed:', data.error);
-      }
-    } catch (error) {
-      console.error('[INDEX] Error checking status:', error);
-    }
-  };
-
-  // 触发文件同步
-  const startSync = async () => {
-    try {
-      setIsSyncing(true);
-      setShowSyncDialog(false);
-      
-      const response = await fetch(`${API_BASE}/api/sync-files`, {
-        method: 'POST'
-      });
-      
-      const data = await response.json();
-      
-      if (data.status === 'started') {
-        // 添加系统消息
-        setMessages(prev => [...prev, {
-          id: Date.now().toString(),
-          type: 'system',
-          content: 'File synchronization started. This may take a few minutes...',
-          timestamp: new Date().toISOString()
-        }]);
-        
-        // 轮询检查同步状态
-        const checkInterval = setInterval(async () => {
-          const statusResponse = await fetch(`${API_BASE}/api/sync-status`);
-          const statusData = await statusResponse.json();
-          
-          if (!statusData.is_running) {
-            clearInterval(checkInterval);
-            setIsSyncing(false);
-            
-            // 重新检查索引状态
-            await checkIndexStatus();
-            
-            setMessages(prev => [...prev, {
-              id: (Date.now() + 1).toString(),
-              type: 'system',
-              content: 'File synchronization completed! All files are now indexed.',
-              timestamp: new Date().toISOString()
-            }]);
-          }
-        }, 5000);  // 每5秒检查一次
-      }
-    } catch (error) {
-      console.error('[SYNC] Error:', error);
-      setIsSyncing(false);
-      
-      setMessages(prev => [...prev, {
-        id: Date.now().toString(),
-        type: 'error',
-        content: `Sync error: ${error}`,
-        timestamp: new Date().toISOString()
-      }]);
-    }
-  };
 
   // 自动初始化会话（从 localStorage 恢复或创建新会话）
   useEffect(() => {
@@ -172,8 +78,6 @@ function App() {
     };
 
     initSession();
-    // 初始化后检查索引状态
-    checkIndexStatus();
   }, []);
 
   // 重置会话（清除当前会话，创建新的）
@@ -343,67 +247,6 @@ function App() {
         </div>
       </header>
 
-      {/* 索引状态栏 */}
-      {indexStatus && (
-        <div className={`index-status-bar ${indexStatus.index_status}`}>
-          <div className="index-status-content">
-            <div className="index-status-info">
-              {indexStatus.index_status === 'up_to_date' && (
-                <span className="status-icon">✅</span>
-              )}
-              {indexStatus.index_status === 'partial_index' && (
-                <span className="status-icon">⚠️</span>
-              )}
-              {indexStatus.index_status === 'no_index' && (
-                <span className="status-icon">❌</span>
-              )}
-              <span className="status-message">{indexStatus.message}</span>
-              {indexStatus.details && (
-                <span className="status-details">
-                  ({indexStatus.details.indexed_files_total} / {indexStatus.details.canvas_files_total} files)
-                </span>
-              )}
-            </div>
-            {isSyncing && (
-              <div className="sync-progress">
-                <div className="spinner"></div>
-                <span>Synchronizing files...</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* 同步确认对话框 */}
-      {showSyncDialog && (
-        <div className="sync-dialog-overlay" onClick={() => setShowSyncDialog(false)}>
-          <div className="sync-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>File Index Update Required</h3>
-            <p>
-              {indexStatus?.index_status === 'no_index' 
-                ? 'No files have been indexed yet. Would you like to download and index all course files now?'
-                : 'Some files are not indexed. Would you like to update the index?'
-              }
-            </p>
-            {indexStatus?.details && (
-              <div className="sync-details">
-                <p><strong>Canvas Courses:</strong> {indexStatus.details.canvas_courses}</p>
-                <p><strong>Total Files in Canvas:</strong> {indexStatus.details.canvas_files_total}</p>
-                <p><strong>Currently Indexed:</strong> {indexStatus.details.indexed_files_total}</p>
-                <p><strong>Missing Files:</strong> {indexStatus.details.missing_files_count}</p>
-              </div>
-            )}
-            <div className="sync-dialog-actions">
-              <button className="btn-cancel" onClick={() => setShowSyncDialog(false)}>
-                Cancel
-              </button>
-              <button className="btn-sync" onClick={startSync}>
-                Start Sync
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* 主内容区 */}
       <div className="app-container">
