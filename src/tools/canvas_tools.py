@@ -1624,10 +1624,10 @@ class VectorStoreListFiles(AsyncTool):
 
 @TOOL.register_module(name="vector_store_get_file", force=True)
 class VectorStoreGetFile(AsyncTool):
-    """根据 file_id 获取和读取文件内容"""
+    """根据 file_id 获取文件信息（注意：无法下载 assistants 用途的文件内容）"""
     
     name = "vector_store_get_file"
-    description = "根据 file_id 获取文件详细信息并读取内容，支持文本文件的完整内容展示"
+    description = "获取文件的元数据信息（文件名、大小、状态等）。注意：OpenAI 不允许下载用于 Vector Store 的文件原始内容，请使用 vector_store_search 工具通过搜索来获取文件中的内容"
     
     parameters = {
         "type": "object",
@@ -1635,11 +1635,6 @@ class VectorStoreGetFile(AsyncTool):
             "file_id": {
                 "type": "string",
                 "description": "OpenAI File ID（从 vector_store_list_files 工具获取）"
-            },
-            "max_length": {
-                "type": "integer",
-                "description": "最大显示长度（默认5000字符）",
-                "nullable": True
             }
         },
         "required": ["file_id"],
@@ -1648,8 +1643,8 @@ class VectorStoreGetFile(AsyncTool):
     
     output_type = "any"
     
-    async def forward(self, file_id: str, max_length: int = 5000) -> ToolResult:
-        """获取文件内容"""
+    async def forward(self, file_id: str) -> ToolResult:
+        """获取文件元数据信息（不包含文件内容）"""
         try:
             # 导入 OpenAI
             try:
@@ -1707,42 +1702,14 @@ class VectorStoreGetFile(AsyncTool):
             
             output += f"\n{'='*60}\n"
             
-            # 尝试读取文件内容
-            try:
-                content_response = client.files.content(file_id)
-                content = content_response.read()
-                
-                # 尝试解码为文本
-                try:
-                    text_content = content.decode('utf-8')
-                    
-                    output += f"\n📖 文件内容:\n"
-                    output += f"{'='*60}\n"
-                    
-                    if len(text_content) > max_length:
-                        output += text_content[:max_length]
-                        output += f"\n\n{'='*60}\n"
-                        output += f"⚠️  内容已截断（显示 {max_length}/{len(text_content)} 字符）\n"
-                        output += f"完整内容共 {len(text_content)} 字符\n"
-                    else:
-                        output += text_content
-                        output += f"\n{'='*60}\n"
-                        output += f"✅ 已显示完整内容（{len(text_content)} 字符）\n"
-                
-                except UnicodeDecodeError:
-                    output += f"\n⚠️  文件是二进制格式，无法显示为文本\n"
-                    output += f"文件大小: {len(content)} 字节\n"
-                    
-                    # 尝试判断文件类型
-                    if content.startswith(b'%PDF'):
-                        output += f"文件类型: PDF 文档\n"
-                    elif content.startswith(b'\x50\x4b'):
-                        output += f"文件类型: ZIP/Office 文档\n"
-                    else:
-                        output += f"文件类型: 未知二进制文件\n"
-            
-            except Exception as e:
-                output += f"\n⚠️  读取文件内容失败: {str(e)}\n"
+            # 添加重要说明
+            output += f"\n⚠️  重要说明:\n"
+            output += f"OpenAI 不允许直接下载用于 Vector Store (assistants) 的文件原始内容。\n"
+            output += f"要访问文件中的内容，请使用以下方法：\n\n"
+            output += f"1. 使用 'vector_store_search' 工具进行语义搜索\n"
+            output += f"   示例: 在知识库中搜索 \"文件主题\"\n\n"
+            output += f"2. 如果需要查看文件列表和基本信息\n"
+            output += f"   使用 'vector_store_list_files' 工具\n"
             
             return ToolResult(output=output, error=None)
             

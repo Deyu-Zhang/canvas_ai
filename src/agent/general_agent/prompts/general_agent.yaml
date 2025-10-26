@@ -109,6 +109,41 @@ system_prompt: |-
   {%- endfor %}
   {%- endif %}
 
+  VECTOR STORE (知识库) 使用策略:
+  如果你有访问 Vector Store 相关的工具（vector_store_list, vector_store_search, vector_store_list_files, vector_store_get_file），请遵循以下策略：
+
+  1. **知识库结构理解**：
+     - 每个课程有一个独立的 Vector Store（知识库）
+     - 每个 Vector Store 包含多个文件（讲义、作业、资料等）
+     - 每个文件有唯一的 file_id（格式：file-xxxxx）
+
+  2. **当用户提到特定文件时的处理流程**：
+     步骤 1: 使用 `vector_store_list` 找到相关的知识库
+     步骤 2: 使用 `vector_store_list_files` 列出该知识库的所有文件
+     步骤 3: 识别用户提到的文件，获取其 file_id
+     步骤 4: 使用 `vector_store_search` 并在搜索中关联该 file_id 进行精确搜索
+     
+     示例：
+     - 用户说："lecture_week1.pdf 里讲了什么？"
+     - 你应该：先列出文件找到 "lecture_week1.pdf" 的 file_id
+     - 然后搜索："lecture week 1 内容"，重点关注该文件的结果
+
+  3. **搜索策略**：
+     - 对于一般问题：直接使用 `vector_store_search` 在整个知识库搜索
+     - 对于特定文件问题：先获取 file_id，然后在搜索结果中优先关注该文件的内容
+     - 对于文件列表问题：使用 `vector_store_list_files` 获取所有文件信息
+
+  4. **重要限制**：
+     - ⚠️ 无法直接下载 Vector Store 中的文件原始内容
+     - `vector_store_get_file` 只能获取文件元数据（文件名、大小、状态）
+     - 要访问文件内容，必须使用 `vector_store_search` 进行搜索
+
+  5. **最佳实践**：
+     - 当用户询问"这门课有哪些资料"时：使用 `vector_store_list_files`
+     - 当用户询问"某个文件的内容"时：先找到 file_id，然后搜索
+     - 当用户询问"某个主题"时：直接使用 `vector_store_search`
+     - 搜索时使用具体、相关的关键词，避免过于宽泛的查询
+
   Here are the rules you should always follow to solve your task:
   1. ALWAYS provide a tool call, else you will fail.
   2. Always use the right arguments for the tools. Never use variable names as the action arguments, use the value instead.

@@ -34,8 +34,9 @@ load_dotenv()
 
 console = Console()
 
-# 下载根目录
-DOWNLOAD_ROOT = Path("file_index")
+# 下载根目录 - 保存到项目根目录的 file_index 文件夹
+# 脚本在 agent_framework-main/ 下，需要向上一级到项目根目录
+DOWNLOAD_ROOT = Path(__file__).parent.parent / "file_index"
 
 # 下载统计
 stats = {
@@ -266,6 +267,48 @@ async def get_file_info(session, canvas_url, headers, file_id):
     return None
 
 
+async def get_page_content(session, canvas_url, headers, course_id, page_url):
+    """获取页面内容"""
+    try:
+        async with session.get(
+            f"{canvas_url}/api/v1/courses/{course_id}/pages/{page_url}",
+            headers=headers
+        ) as response:
+            if response.status == 200:
+                return await response.json()
+    except:
+        pass
+    return None
+
+
+async def get_assignment_details(session, canvas_url, headers, course_id, assignment_id):
+    """获取作业详细信息"""
+    try:
+        async with session.get(
+            f"{canvas_url}/api/v1/courses/{course_id}/assignments/{assignment_id}",
+            headers=headers
+        ) as response:
+            if response.status == 200:
+                return await response.json()
+    except:
+        pass
+    return None
+
+
+def extract_files_from_html(html_content):
+    """从HTML内容中提取文件链接"""
+    import re
+    if not html_content:
+        return []
+    
+    # 匹配 Canvas 文件链接
+    # 格式: /files/{file_id}/download 或 /courses/{course_id}/files/{file_id}
+    pattern = r'/files/(\d+)(?:/download)?'
+    matches = re.findall(pattern, html_content)
+    
+    return list(set(matches))  # 去重
+
+
 def can_upload_to_vector_store(file_path: Path) -> bool:
     """检查文件是否可以上传到 Vector Store"""
     # 检查扩展名
@@ -370,9 +413,13 @@ async def process_course(session, canvas_url, headers, course, progress, task_id
         if not items:
             items = await get_module_items(session, canvas_url, headers, course_id, module['id'])
         
-        # 处理模块中的文件
+        # 处理模块中的各种类型项目
         for item in items:
-            if item.get('type') == 'File':
+            item_type = item.get('type')
+            item_title = item.get('title', 'unnamed')
+            
+            # 1. 处理 File 类型
+            if item_type == 'File':
                 file_id = item.get('content_id')
                 if file_id:
                     file_info = await get_file_info(session, canvas_url, headers, file_id)
@@ -393,6 +440,101 @@ async def process_course(session, canvas_url, headers, course, progress, task_id
                                 "file": file_name,
                                 "error": msg
                             })
+                    else:
+                        stats["errors"].append({
+                            "course": course_name,
+                            "module": module_name,
+                            "file": f"File ID {file_id}",
+                            "error": "无法获取文件信息（可能无权限）"
+                        })
+            
+            # 2. 处理 Page 类型（课程页面可能包含附件）
+            elif item_type == 'Page':
+                page_url = item.get('page_url')
+                if page_url:
+                    page_content = await get_page_content(session, canvas_url, headers, course_id, page_url)
+                    if page_content:
+                        # 保存页面 HTML 内容
+                        html_content = page_content.get('body', '')
+                        if html_content:
+                            page_file_name = sanitize_filename(f"{item_title}.html")
+                            page_file_path = module_path / page_file_name
+                            page_file_path.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            with open(page_file_path, 'w', encoding='utf-8') as f:
+                                f.write(html_content)
+                            
+                            course_stats["files_from_modules"] += 1
+                            course_stats["files_downloaded"] += 1
+                            stats["files_downloaded"] += 1
+                        
+                        # 提取页面中的文件链接并下载
+                        file_ids = extract_files_from_html(html_content)
+                        for file_id in file_ids:
+                            file_info = await get_file_info(session, canvas_url, headers, file_id)
+                            if file_info:
+                                file_name = sanitize_filename(file_info.get('display_name', 'unnamed'))
+                                file_path = module_path / file_name
+                                
+                                success, msg = await download_file(session, file_info, file_path)
+                                if success:
+                                    course_stats["files_from_modules"] += 1
+                                    course_stats["files_downloaded"] += 1
+            
+            # 3. 处理 Assignment 类型（作业可能有附件）
+            elif item_type == 'Assignment':
+                assignment_id = item.get('content_id')
+                if assignment_id:
+                    assignment_details = await get_assignment_details(
+                        session, canvas_url, headers, course_id, assignment_id
+                    )
+                    if assignment_details:
+                        # 保存作业描述为 HTML
+                        description = assignment_details.get('description', '')
+                        if description:
+                            assignment_file_name = sanitize_filename(f"{item_title}_description.html")
+                            assignment_file_path = module_path / assignment_file_name
+                            assignment_file_path.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            with open(assignment_file_path, 'w', encoding='utf-8') as f:
+                                f.write(description)
+                            
+                            course_stats["files_from_modules"] += 1
+                            course_stats["files_downloaded"] += 1
+                            stats["files_downloaded"] += 1
+                        
+                        # 处理作业的附件（attachments字段）
+                        attachments = assignment_details.get('attachments', [])
+                        for attachment in attachments:
+                            # 附件就是一个文件对象
+                            file_name = sanitize_filename(attachment.get('display_name', attachment.get('filename', 'unnamed')))
+                            file_path = module_path / file_name
+                            
+                            success, msg = await download_file(session, attachment, file_path)
+                            if success:
+                                course_stats["files_from_modules"] += 1
+                                course_stats["files_downloaded"] += 1
+                            else:
+                                course_stats["files_failed"] += 1
+                                stats["errors"].append({
+                                    "course": course_name,
+                                    "module": module_name,
+                                    "file": file_name,
+                                    "error": f"附件下载失败: {msg}"
+                                })
+                        
+                        # 提取描述中的文件链接
+                        file_ids = extract_files_from_html(description)
+                        for file_id in file_ids:
+                            file_info = await get_file_info(session, canvas_url, headers, file_id)
+                            if file_info:
+                                file_name = sanitize_filename(file_info.get('display_name', 'unnamed'))
+                                file_path = module_path / file_name
+                                
+                                success, msg = await download_file(session, file_info, file_path)
+                                if success:
+                                    course_stats["files_from_modules"] += 1
+                                    course_stats["files_downloaded"] += 1
     
     # ================================================
     # 2. 处理 Files 区域的文件
@@ -425,11 +567,12 @@ async def process_course(session, canvas_url, headers, course, progress, task_id
     return course_stats
 
 
-async def main(skip_download=False):
+async def main(skip_download=False, course_id=None):
     """主函数
     
     Args:
         skip_download: 如果为True，跳过下载直接上传已有文件到Vector Store
+        course_id: 如果指定，只下载该课程ID的文件
     """
     
     # 打印欢迎信息
@@ -530,30 +673,37 @@ async def main(skip_download=False):
         
         async with aiohttp.ClientSession() as session:
             # 获取所有课程
-            courses = await get_courses(session, canvas_url, headers)
+            all_courses = await get_courses(session, canvas_url, headers)
             
-            if not courses:
+            if not all_courses:
                 console.print("⚠️  未找到任何课程", style="yellow")
                 return
             
-            # 显示课程列表
-            console.print("📋 课程列表:", style="cyan bold")
-            for i, course in enumerate(courses, 1):
-                console.print(f"  {i}. {course.get('name', 'N/A')} (ID: {course['id']})", style="dim")
-            console.print()
-
-            courses = select_courses(courses)
-            if not courses:
-                console.print("⚠️  没有可下载的课程", style="yellow")
-                return
-            
-            # 询问是否继续
-            console.print(f"将下载 {len(courses)} 个课程的所有文件", style="yellow bold")
-            response = console.input("是否继续? (y/n): ")
-            
-            if response.lower() != 'y':
-                console.print("已取消", style="yellow")
-                return
+            # 如果指定了课程ID，只处理该课程
+            if course_id:
+                courses = [c for c in all_courses if str(c['id']) == str(course_id)]
+                if not courses:
+                    console.print(f"❌ 未找到课程ID: {course_id}", style="red bold")
+                    console.print("\n可用的课程:", style="yellow")
+                    for i, course in enumerate(all_courses, 1):
+                        console.print(f"  {i}. {course.get('name', 'N/A')} (ID: {course['id']})", style="dim")
+                    return
+                console.print(f"✓ 找到指定课程: {courses[0].get('name', 'N/A')} (ID: {course_id})", style="green bold")
+            else:
+                courses = all_courses
+                # 显示课程列表
+                console.print("📋 课程列表:", style="cyan bold")
+                for i, course in enumerate(courses, 1):
+                    console.print(f"  {i}. {course.get('name', 'N/A')} (ID: {course['id']})", style="dim")
+                console.print()
+                
+                # 询问是否继续
+                console.print(f"将下载 {len(courses)} 个课程的所有文件", style="yellow bold")
+                response = console.input("是否继续? (y/n): ")
+                
+                if response.lower() != 'y':
+                    console.print("已取消", style="yellow")
+                    return
             
             console.print()
             
@@ -747,12 +897,18 @@ if __name__ == "__main__":
         action="store_true",
         help="同 --upload-only（别名）"
     )
+    parser.add_argument(
+        "--course-id",
+        type=str,
+        help="只下载指定课程ID的文件（例如：--course-id 154630）"
+    )
     
     args = parser.parse_args()
     skip_download = args.upload_only or args.skip_download
+    course_id = args.course_id
     
     try:
-        asyncio.run(main(skip_download=skip_download))
+        asyncio.run(main(skip_download=skip_download, course_id=course_id))
     except KeyboardInterrupt:
         console.print("\n\n⚠️  用户中断操作", style="yellow")
         if stats['files_downloaded'] > 0:
