@@ -46,10 +46,14 @@ stats = {
     "files_downloaded": 0,
     "files_skipped": 0,
     "files_failed": 0,
+    "files_inaccessible": 0,
     "total_size": 0,
     "vector_stores_created": 0,
+    "vector_stores_reused": 0,
     "files_uploaded_to_vector_store": 0,
+    "files_upload_skipped": 0,
     "files_upload_failed": 0,
+    "inaccessible_files": [],  # 记录无法访问的文件
     "errors": []
 }
 
@@ -107,11 +111,12 @@ async def fetch_all_pages(session, url, headers, params=None):
     return all_data
 
 
-async def download_file(session, file_info, file_path):
+async def download_file(session, file_info, file_path, course_name=""):
     """下载单个文件"""
     file_url = file_info.get('url')
     file_name = file_info.get('display_name', 'unnamed')
     file_size = file_info.get('size', 0)
+    file_id = file_info.get('id', '')
     
     if not file_url:
         return False, "无下载链接"
@@ -135,6 +140,16 @@ async def download_file(session, file_info, file_path):
                 stats["files_downloaded"] += 1
                 stats["total_size"] += file_size
                 return True, "成功"
+            elif response.status == 403:
+                # 记录无法访问的文件
+                stats["files_inaccessible"] += 1
+                stats["inaccessible_files"].append({
+                    "course": course_name,
+                    "file_name": file_name,
+                    "file_id": file_id,
+                    "error": "403 Forbidden"
+                })
+                return False, "403 Forbidden (无权访问)"
             else:
                 return False, f"HTTP {response.status}"
                 
@@ -155,45 +170,6 @@ async def get_courses(session, canvas_url, headers):
     
     console.print(f"✓ 找到 {len(courses)} 个课程\n", style="green")
     return courses
-
-
-def select_courses(courses):
-    """让用户从课程列表中进行选择"""
-    if not courses:
-        return []
-
-    console.print("输入课程序号进行选择，可使用以下格式:", style="cyan")
-    console.print("  • 输入 `all` 或直接回车下载全部课程", style="dim")
-    console.print("  • 输入单个数字选择对应课程 (例如: 3)", style="dim")
-    console.print("  • 输入多个数字并用逗号分隔选择多个课程 (例如: 1,3,5)\n", style="dim")
-
-    while True:
-        choice = console.input("选择要下载的课程 (默认 all): ").strip().lower()
-
-        if choice in ("", "all"):
-            return courses
-
-        try:
-            selected_indices = set()
-            for part in choice.split(','):
-                part = part.strip()
-                if not part:
-                    continue
-                index = int(part)
-                if 1 <= index <= len(courses):
-                    selected_indices.add(index - 1)
-                else:
-                    raise ValueError
-
-            if not selected_indices:
-                raise ValueError
-
-            selected = [courses[i] for i in sorted(selected_indices)]
-            console.print(f"✓ 已选择 {len(selected)} 门课程\n", style="green")
-            return selected
-
-        except ValueError:
-            console.print("⚠️  输入无效，请输入课程编号或 `all`", style="yellow")
 
 
 async def get_course_modules(session, canvas_url, headers, course_id):
@@ -221,6 +197,18 @@ async def get_module_items(session, canvas_url, headers, course_id, module_id):
 async def get_course_files(session, canvas_url, headers, course_id):
     """获取课程的所有文件（Files区域）"""
     try:
+        # 尝试直接获取文件列表
+        async with session.get(
+            f"{canvas_url}/api/v1/courses/{course_id}/files",
+            headers=headers,
+            params={"per_page": 1}
+        ) as response:
+            if response.status == 403:
+                # 403 Forbidden - 记录并返回空列表
+                return None  # 返回 None 表示无权访问
+            elif response.status != 200:
+                return []
+        
         files = await fetch_all_pages(
             session,
             f"{canvas_url}/api/v1/courses/{course_id}/files",
@@ -427,7 +415,7 @@ async def process_course(session, canvas_url, headers, course, progress, task_id
                         file_name = sanitize_filename(file_info.get('display_name', 'unnamed'))
                         file_path = module_path / file_name
                         
-                        success, msg = await download_file(session, file_info, file_path)
+                        success, msg = await download_file(session, file_info, file_path, course_name)
                         
                         if success:
                             course_stats["files_from_modules"] += 1
@@ -476,7 +464,7 @@ async def process_course(session, canvas_url, headers, course, progress, task_id
                                 file_name = sanitize_filename(file_info.get('display_name', 'unnamed'))
                                 file_path = module_path / file_name
                                 
-                                success, msg = await download_file(session, file_info, file_path)
+                                success, msg = await download_file(session, file_info, file_path, course_name)
                                 if success:
                                     course_stats["files_from_modules"] += 1
                                     course_stats["files_downloaded"] += 1
@@ -510,7 +498,7 @@ async def process_course(session, canvas_url, headers, course, progress, task_id
                             file_name = sanitize_filename(attachment.get('display_name', attachment.get('filename', 'unnamed')))
                             file_path = module_path / file_name
                             
-                            success, msg = await download_file(session, attachment, file_path)
+                            success, msg = await download_file(session, attachment, file_path, course_name)
                             if success:
                                 course_stats["files_from_modules"] += 1
                                 course_stats["files_downloaded"] += 1
@@ -531,7 +519,7 @@ async def process_course(session, canvas_url, headers, course, progress, task_id
                                 file_name = sanitize_filename(file_info.get('display_name', 'unnamed'))
                                 file_path = module_path / file_name
                                 
-                                success, msg = await download_file(session, file_info, file_path)
+                                success, msg = await download_file(session, file_info, file_path, course_name)
                                 if success:
                                     course_stats["files_from_modules"] += 1
                                     course_stats["files_downloaded"] += 1
@@ -541,12 +529,17 @@ async def process_course(session, canvas_url, headers, course, progress, task_id
     # ================================================
     files = await get_course_files(session, canvas_url, headers, course_id)
     
+    # 如果返回 None，表示整个课程无权访问（极少见）
+    if files is None:
+        console.print(f"⚠️  课程 '{course_name}' (ID: {course_id}) 无权访问 (403 Forbidden)", style="yellow")
+        return course_stats
+    
     for file_info in files:
         file_name = sanitize_filename(file_info.get('display_name', 'unnamed'))
         # 将Files区域的文件放在单独的文件夹中
         file_path = course_path / "Files" / file_name
         
-        success, msg = await download_file(session, file_info, file_path)
+        success, msg = await download_file(session, file_info, file_path, course_name)
         
         if success:
             course_stats["files_from_files"] += 1
@@ -567,12 +560,13 @@ async def process_course(session, canvas_url, headers, course, progress, task_id
     return course_stats
 
 
-async def main(skip_download=False, course_id=None):
+async def main(skip_download=False, course_id=None, auto_confirm=False):
     """主函数
     
     Args:
         skip_download: 如果为True，跳过下载直接上传已有文件到Vector Store
         course_id: 如果指定，只下载该课程ID的文件
+        auto_confirm: 如果为True，自动确认下载，不询问用户
     """
     
     # 打印欢迎信息
@@ -697,13 +691,16 @@ async def main(skip_download=False, course_id=None):
                     console.print(f"  {i}. {course.get('name', 'N/A')} (ID: {course['id']})", style="dim")
                 console.print()
                 
-                # 询问是否继续
-                console.print(f"将下载 {len(courses)} 个课程的所有文件", style="yellow bold")
-                response = console.input("是否继续? (y/n): ")
-                
-                if response.lower() != 'y':
-                    console.print("已取消", style="yellow")
-                    return
+                # 询问是否继续（除非是自动确认模式）
+                if not auto_confirm:
+                    console.print(f"将下载 {len(courses)} 个课程的所有文件", style="yellow bold")
+                    response = console.input("是否继续? (y/n): ")
+                    
+                    if response.lower() != 'y':
+                        console.print("已取消", style="yellow")
+                        return
+                else:
+                    console.print(f"自动模式：检查 {len(courses)} 个课程的文件（只下载缺失的文件）", style="green bold")
             
             console.print()
             
@@ -736,6 +733,13 @@ async def main(skip_download=False, course_id=None):
         console.print("☁️  上传文件到 OpenAI Vector Store", style="magenta bold")
         console.print("="*70 + "\n", style="magenta bold")
         
+        # 读取现有的 vector_stores_mapping.json，获取已上传的文件
+        existing_mapping = {}
+        mapping_file = DOWNLOAD_ROOT / "vector_stores_mapping.json"
+        if mapping_file.exists():
+            with open(mapping_file, 'r', encoding='utf-8') as f:
+                existing_mapping = json.load(f)
+        
         # 获取所有已下载的文件并按课程组织
         course_files = {}
         
@@ -744,16 +748,37 @@ async def main(skip_download=False, course_id=None):
                 course_name = course_folder.name
                 files_to_upload = []
                 
-                # 收集所有可上传的文件
+                # 获取该课程已上传的文件路径（标准化路径分隔符）
+                uploaded_files = set()
+                if course_name in existing_mapping:
+                    for file_info in existing_mapping[course_name].get('files', []):
+                        file_path_in_mapping = file_info.get('path', '')
+                        # 标准化路径分隔符为正斜杠进行比较
+                        normalized_path = file_path_in_mapping.replace('\\', '/')
+                        uploaded_files.add(normalized_path)
+                
+                # 收集所有可上传的文件（跳过已上传的）
                 for file_path in course_folder.rglob('*'):
                     if file_path.is_file() and can_upload_to_vector_store(file_path):
-                        files_to_upload.append(file_path)
+                        # 计算相对路径并标准化为正斜杠
+                        relative_path = str(file_path.relative_to(DOWNLOAD_ROOT)).replace('\\', '/')
+                        # 如果文件还没上传，添加到列表
+                        if relative_path not in uploaded_files:
+                            files_to_upload.append(file_path)
+                        else:
+                            stats["files_upload_skipped"] += 1
                 
                 if files_to_upload:
                     course_files[course_name] = files_to_upload
         
+        total_new_files = sum(len(files) for files in course_files.values())
+        
+        if total_new_files > 0:
+            console.print(f"找到 {len(course_files)} 个课程，共 {total_new_files} 个新文件需要上传\n", style="green")
+        else:
+            console.print("✓ 所有文件都已上传到 Vector Store\n", style="green")
+        
         if course_files:
-            console.print(f"找到 {len(course_files)} 个课程，共 {sum(len(files) for files in course_files.values())} 个可上传文件\n", style="green")
             
             with Progress(
                 SpinnerColumn(),
@@ -772,16 +797,31 @@ async def main(skip_download=False, course_id=None):
                 for course_name, files in course_files.items():
                     progress.update(upload_task, description=f"[magenta]处理: {course_name[:40]}")
                     
-                    # 为每个课程创建一个 Vector Store
-                    vector_store_id = create_vector_store_for_course(openai_client, course_name, "")
-                    
-                    if vector_store_id:
+                    # 检查是否已经有 Vector Store，如果有就使用现有的
+                    if course_name in existing_mapping and 'vector_store_id' in existing_mapping[course_name]:
+                        vector_store_id = existing_mapping[course_name]['vector_store_id']
+                        console.print(f"  使用现有 Vector Store: {vector_store_id}", style="dim")
+                        stats["vector_stores_reused"] += 1
+                        
+                        # 保留现有的文件列表
                         vector_stores_info[course_name] = {
                             "vector_store_id": vector_store_id,
-                            "files": []
+                            "files": existing_mapping[course_name].get('files', [])
                         }
+                    else:
+                        # 为每个课程创建一个新的 Vector Store
+                        vector_store_id = create_vector_store_for_course(openai_client, course_name, "")
                         
-                        # 上传文件
+                        if vector_store_id:
+                            vector_stores_info[course_name] = {
+                                "vector_store_id": vector_store_id,
+                                "files": []
+                            }
+                        else:
+                            vector_store_id = None
+                    
+                    if vector_store_id:
+                        # 上传新文件
                         for file_path in files:
                             success, file_id = upload_to_vector_store(
                                 openai_client,
@@ -801,12 +841,19 @@ async def main(skip_download=False, course_id=None):
                     
                     progress.update(upload_task, advance=1)
                 
+                # 合并现有的mapping（保留没有新文件上传的课程）
+                for course_name, course_data in existing_mapping.items():
+                    if course_name not in vector_stores_info:
+                        vector_stores_info[course_name] = course_data
+                
                 # 保存 Vector Store 映射
                 vector_store_mapping_path = DOWNLOAD_ROOT / "vector_stores_mapping.json"
                 with open(vector_store_mapping_path, 'w', encoding='utf-8') as f:
                     json.dump(vector_stores_info, f, indent=2, ensure_ascii=False)
                 
                 console.print(f"\n✓ Vector Store 映射已保存: {vector_store_mapping_path}", style="green")
+        elif existing_mapping:
+            console.print("✓ 没有新文件需要上传，保持现有 Vector Store 配置", style="green")
         else:
             console.print("⚠️  没有找到可上传到 Vector Store 的文件", style="yellow")
     
@@ -815,8 +862,14 @@ async def main(skip_download=False, course_id=None):
     duration = (end_time - start_time).total_seconds()
     
     console.print("\n" + "="*70, style="green bold")
-    console.print("✅ 下载完成！", style="green bold")
+    console.print("✅ 同步完成！", style="green bold")
     console.print("="*70 + "\n", style="green bold")
+    
+    # 显示实际操作的文件数
+    actual_downloaded = stats["files_downloaded"]
+    actual_skipped = stats["files_skipped"]
+    console.print(f"📊 实际新下载: {actual_downloaded} 个文件", style="cyan")
+    console.print(f"📊 跳过已存在: {actual_skipped} 个文件", style="dim")
     
     # 统计表格
     table = Table(title="下载与上传统计", show_header=True)
@@ -830,12 +883,16 @@ async def main(skip_download=False, course_id=None):
     table.add_row("成功下载", str(stats["files_downloaded"]))
     table.add_row("已跳过（已存在）", str(stats["files_skipped"]))
     table.add_row("下载失败", str(stats["files_failed"]))
+    if stats["files_inaccessible"] > 0:
+        table.add_row("无法访问（403）", str(stats["files_inaccessible"]), style="yellow")
     table.add_row("总大小", f"{stats['total_size'] / (1024*1024):.2f} MB")
     
     if upload_to_openai:
         table.add_row("━━━━ Vector Store ━━━━", "", style="bold magenta")
         table.add_row("Vector Stores 创建", str(stats["vector_stores_created"]))
+        table.add_row("Vector Stores 重用", str(stats["vector_stores_reused"]))
         table.add_row("文件上传成功", str(stats["files_uploaded_to_vector_store"]))
+        table.add_row("文件跳过（已存在）", str(stats["files_upload_skipped"]), style="dim")
         table.add_row("文件上传失败", str(stats["files_upload_failed"]))
     
     table.add_row("━━━━━━━━━━━━", "", style="bold")
@@ -879,6 +936,13 @@ async def main(skip_download=False, course_id=None):
             console.print(f"\n... 还有 {len(stats['errors']) - 20} 个错误未显示", style="dim")
     
     console.print(f"\n📁 文件保存位置: {DOWNLOAD_ROOT.absolute()}", style="green bold")
+    
+    # 保存无法访问的文件列表
+    if stats["inaccessible_files"]:
+        inaccessible_file = DOWNLOAD_ROOT / "inaccessible_files.json"
+        with open(inaccessible_file, 'w', encoding='utf-8') as f:
+            json.dump(stats["inaccessible_files"], f, indent=2, ensure_ascii=False)
+        console.print(f"\n⚠️  {len(stats['inaccessible_files'])} 个文件无法访问（已记录到 inaccessible_files.json）", style="yellow")
 
 
 if __name__ == "__main__":

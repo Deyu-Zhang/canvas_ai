@@ -86,21 +86,22 @@ def check_frontend():
         print(f"   (Path checked: {frontend_build})")
         return False
 
-def install_localtunnel():
-    """安装 localtunnel"""
-    print("\n🌐 Checking localtunnel...")
+def check_tunnel_tool():
+    """检查隧道工具"""
+    print("\n🌐 Checking tunnel tool (ngrok)...")
     
     try:
         result = subprocess.run(
-            ['npx', 'localtunnel', '--version'],
+            ['ngrok', 'version'],
             capture_output=True,
             text=True
         )
-        print("  ✓ localtunnel available")
+        print(f"  ✓ ngrok available: {result.stdout.strip()}")
         return True
     except:
-        print("  ℹ️  localtunnel will be installed on first use")
-        return True
+        print("  ⚠️  ngrok not found")
+        print("     Install from: https://ngrok.com/download")
+        return False
 
 def start_backend(port=8000):
     """启动后端服务器"""
@@ -122,49 +123,74 @@ def start_backend(port=8000):
     
     return backend_process
 
-def start_localtunnel(port=8000, subdomain=None):
-    """启动 localtunnel"""
-    print(f"\n🌍 Starting localtunnel for port {port}...")
-    
-    # Windows 需要使用 shell=True 或者 .cmd 后缀
-    cmd = ['npx', 'localtunnel', '--port', str(port)]
-    
-    if subdomain:
-        cmd.extend(['--subdomain', subdomain])
+def start_ngrok(port=8000):
+    """启动 ngrok"""
+    print(f"\n🌍 Starting ngrok for port {port}...")
     
     try:
-        # 在 Windows 上使用 shell=True
+        # 检查 ngrok 是否已安装
+        result = subprocess.run(['ngrok', 'version'], capture_output=True, text=True)
+        print(f"   Found ngrok: {result.stdout.strip()}")
+    except:
+        print("   ⚠️  ngrok not found!")
+        print("   Please install ngrok:")
+        print("   1. Download from: https://ngrok.com/download")
+        print("   2. Or run: choco install ngrok (if you have Chocolatey)")
+        print("   3. Sign up for free account at: https://ngrok.com/")
+        print("   4. Run: ngrok config add-authtoken YOUR_TOKEN")
+        return None
+    
+    try:
+        # 启动 ngrok（使用 --url 参数来请求一个临时域名）
+        cmd = ['ngrok', 'http', str(port), '--log=stdout']
+        
         tunnel_process = subprocess.Popen(
             cmd,
-            shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1
         )
         
-        # 等待 tunnel 启动并显示 URL
-        print("   Waiting for tunnel to establish...")
+        print("   Waiting for ngrok to establish...")
+        time.sleep(5)
         
-        # 读取并显示输出
+        # 尝试从 ngrok API 获取公网 URL
+        try:
+            import requests
+            response = requests.get('http://127.0.0.1:4040/api/tunnels', timeout=5)
+            if response.status_code == 200:
+                tunnels = response.json()['tunnels']
+                if tunnels:
+                    public_url = tunnels[0]['public_url']
+                    print(f"\n✓ Ngrok tunnel started!")
+                    print(f"   Public URL: {public_url}")
+                    print(f"   Local URL:  http://localhost:{port}")
+                    print(f"   Web UI:     http://127.0.0.1:4040")
+                    return tunnel_process
+        except Exception as e:
+            print(f"   ⚠️  Could not get tunnel URL from API: {e}")
+        
+        # 如果 API 获取失败，读取 stdout
+        print("   Checking tunnel output...")
         import threading
         def read_output():
-            for line in tunnel_process.stdout:
-                print(f"   {line.strip()}")
-                if 'your url is:' in line.lower():
-                    break
+            try:
+                for line in tunnel_process.stdout:
+                    if 'url=' in line.lower() or 'started tunnel' in line.lower():
+                        print(f"   {line.strip()}")
+                        if 'url=' in line.lower():
+                            break
+            except:
+                pass
         
         output_thread = threading.Thread(target=read_output, daemon=True)
         output_thread.start()
         
-        time.sleep(5)
-        
         return tunnel_process
         
     except Exception as e:
-        print(f"   ⚠️  Failed to start localtunnel: {e}")
-        print(f"   You can start it manually in another terminal:")
-        print(f"   npx localtunnel --port {port}")
+        print(f"   ⚠️  Failed to start ngrok: {e}")
         return None
 
 def main():
@@ -185,20 +211,25 @@ def main():
     # 检查前端
     frontend_ready = check_frontend()
     
-    # 安装 localtunnel
-    install_localtunnel()
+    # 检查隧道工具
+    tunnel_available = check_tunnel_tool()
     
     # 询问是否使用 tunnel
     print("\n" + "="*60)
     print("Configuration:")
     print("="*60)
     
-    use_tunnel = input("\n🌐 Enable public access via localtunnel? (y/n): ").lower() == 'y'
-    
-    if use_tunnel:
-        subdomain = input("   Subdomain (leave empty for random): ").strip() or None
+    # 默认不启用 ngrok，避免域名配置问题
+    print("\n💡 Tip: 使用本地地址访问即可，公网访问需要额外配置")
+    if tunnel_available:
+        use_tunnel = input("\n🌐 Enable public access via ngrok? (需要先申请免费域名) (y/n): ").lower() == 'y'
+        if use_tunnel:
+            print("\n⚠️  注意: 如果出现域名错误，请先访问:")
+            print("   https://dashboard.ngrok.com/domains")
+            print("   申请一个免费的 static domain")
     else:
-        subdomain = None
+        use_tunnel = False
+        print("\n⚠️  Ngrok not available, skipping public access setup")
     
     port = input("\n📡 Port (default: 8000): ").strip() or '8000'
     port = int(port)
@@ -215,9 +246,9 @@ def main():
         backend = start_backend(port)
         processes.append(backend)
         
-        # 启动 LocalTunnel（如果需要）
+        # 启动 Ngrok（如果需要）
         if use_tunnel:
-            tunnel = start_localtunnel(port, subdomain)
+            tunnel = start_ngrok(port)
             if tunnel:
                 processes.append(tunnel)
         
@@ -228,10 +259,9 @@ def main():
         print(f"   🏠 Local:  http://localhost:{port}")
         
         if use_tunnel:
-            print(f"   🌍 Public: Check the LocalTunnel output above")
-            print(f"              (URL format: https://xxxxx.loca.lt)")
-            print(f"   🔑 Password: Your public IP address")
-            print(f"              (Get it from: https://loca.lt/mytunnelpassword)")
+            print(f"   🌍 Public: Check the ngrok output above")
+            print(f"              (URL format: https://xxxxx.ngrok-free.app)")
+            print(f"   🎛️  Web UI: http://127.0.0.1:4040 (inspect requests)")
         
         print(f"\n📖 API Documentation:")
         print(f"   http://localhost:{port}/docs")

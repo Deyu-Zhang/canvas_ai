@@ -1,32 +1,31 @@
-# 核心依赖
+# Core Dependencies
 openai>=1.0.0
 pydantic>=2.0.0
 jinja2>=3.0.0
 pyyaml>=6.0.0
 
-# 配置管理
+# Configuration Management
 mmengine>=0.10.0
 python-dotenv>=1.0.0
 
-# 异步和并发
+# Async and Concurrency
 asyncio
 aiohttp>=3.9.0
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 websockets>=12.0
 
-# 日志和可视化
+# Logging and Visualization
 rich>=13.0.0
 
-# 工具相关
+# Tools and Utilities
 huggingface-hub>=0.19.0
-
 crawl4ai
 json5
 firecrawl
 
-
-# 可选依赖（根据需要安装）
-# anthropic     # 如果使用Anthropic
-# google-generativeai  # 如果使用Google AI
+# Optional Dependencies (install as needed)
+# azure-openai  # For Azure OpenAI
+# anthropic     # For Anthropic
+# google-generativeai  # For Google AI
 

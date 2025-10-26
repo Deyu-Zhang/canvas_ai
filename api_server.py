@@ -3,7 +3,7 @@ Canvas AI Agent - FastAPI Backend Server
 提供 RESTful API 接口供前端调用
 """
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 from datetime import datetime
 import json
 import traceback
+import uuid
+from collections import defaultdict
 
 # 导入 Agent 相关模块
 from configs.canvas_agent_config import canvas_student_agent_config
@@ -38,7 +40,144 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 全局 Agent 实例
+# 会话管理器
+class SessionManager:
+    """管理多个用户的会话和 Agent 实例"""
+    
+    def __init__(self):
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+        self.model_manager = None
+        self.base_config = None
+        self.manager_initialized = False
+    
+    async def initialize(self):
+        """初始化会话管理器（只需要初始化一次）"""
+        if self.manager_initialized:
+            return True
+        
+        try:
+            # 检查环境变量
+            canvas_url = os.getenv("CANVAS_URL")
+            canvas_token = os.getenv("CANVAS_ACCESS_TOKEN")
+            azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+            openai_key = os.getenv("OPENAI_API_KEY")
+            
+            if not all([canvas_url, canvas_token, azure_key, openai_key]):
+                raise Exception("Missing required environment variables")
+            
+            # 导入必要的模块
+            from src.models import model_manager
+            from src.logger import logger
+            from pathlib import Path
+            
+            # 初始化 logger
+            log_dir = Path("workdir/api_server")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            logger.init_logger(str(log_dir / "log.txt"))
+            
+            # 初始化模型管理器
+            model_manager.init_models()
+            self.model_manager = model_manager
+            self.base_config = canvas_student_agent_config
+            self.manager_initialized = True
+            
+            print("[OK] Session Manager initialized successfully")
+            return True
+            
+        except Exception as e:
+            print(f"[ERROR] Session Manager initialization failed: {e}")
+            traceback.print_exc()
+            return False
+    
+    async def get_or_create_session(self, session_id: Optional[str] = None, username: Optional[str] = None) -> tuple[str, Dict[str, Any]]:
+        """获取或创建用户会话"""
+        # 如果没有提供 session_id，创建新的
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        
+        # 如果会话已存在，返回现有会话
+        if session_id in self.sessions:
+            return session_id, self.sessions[session_id]
+        
+        # 创建新会话
+        try:
+            from src.registry import AGENT
+            
+            # 获取模型
+            model = self.model_manager.registed_models[self.base_config["model_id"]]
+            
+            # 准备 Agent 构建配置
+            agent_build_config = dict(
+                type=self.base_config["type"],
+                config=self.base_config,
+                model=model,
+                tools=self.base_config["tools"],
+                max_steps=self.base_config.get("max_steps", 10),
+                name=self.base_config.get("name"),
+                description=self.base_config.get("description"),
+            )
+            
+            # 为该用户创建独立的 Agent 实例
+            agent = AGENT.build(agent_build_config)
+            
+            # 存储会话信息
+            session_data = {
+                "session_id": session_id,
+                "username": username or f"User_{session_id[:8]}",
+                "agent": agent,
+                "created_at": datetime.now().isoformat(),
+                "last_active": datetime.now().isoformat(),
+                "message_count": 0
+            }
+            
+            self.sessions[session_id] = session_data
+            print(f"[NEW SESSION] Created session {session_id} for user '{session_data['username']}'")
+            print(f"[SESSIONS] Total active sessions: {len(self.sessions)}")
+            
+            return session_id, session_data
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to create session: {e}")
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
+    
+    def update_session_activity(self, session_id: str):
+        """更新会话的最后活动时间"""
+        if session_id in self.sessions:
+            self.sessions[session_id]["last_active"] = datetime.now().isoformat()
+            self.sessions[session_id]["message_count"] += 1
+    
+    def get_session_info(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """获取会话信息（不包含 agent 对象）"""
+        if session_id in self.sessions:
+            session = self.sessions[session_id]
+            return {
+                "session_id": session["session_id"],
+                "username": session["username"],
+                "created_at": session["created_at"],
+                "last_active": session["last_active"],
+                "message_count": session["message_count"]
+            }
+        return None
+    
+    def list_active_sessions(self) -> List[Dict[str, Any]]:
+        """列出所有活动会话"""
+        return [self.get_session_info(sid) for sid in self.sessions.keys()]
+    
+    def delete_session(self, session_id: str) -> bool:
+        """删除指定会话"""
+        if session_id in self.sessions:
+            username = self.sessions[session_id]["username"]
+            del self.sessions[session_id]
+            print(f"[DELETE SESSION] Removed session {session_id} (user: {username})")
+            print(f"[SESSIONS] Total active sessions: {len(self.sessions)}")
+            return True
+        return False
+
+# 全局会话管理器
+session_manager = SessionManager()
+
+# 旧的全局 Agent（为了向后兼容，保留但不使用）
 agent = None
 agent_initialized = False
 
@@ -46,6 +185,10 @@ agent_initialized = False
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+    username: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    username: str
 
 class ChatResponse(BaseModel):
     response: str
@@ -146,7 +289,7 @@ async def initialize_agent():
 # 启动事件
 @app.on_event("startup")
 async def startup_event():
-    """应用启动时初始化 Agent"""
+    """应用启动时初始化 Session Manager"""
     import sys
     if sys.platform == "win32":
         try:
@@ -156,14 +299,16 @@ async def startup_event():
     
     print("\n" + "="*60)
     print("[*] Canvas AI Agent API Server Starting...")
+    print("[*] Multi-User Session Support Enabled")
     print("="*60 + "\n")
     
-    success = await initialize_agent()
+    success = await session_manager.initialize()
     
     if success:
         print("\n[OK] Server ready to accept requests")
+        print("[OK] Multi-user support enabled - each user gets their own agent")
     else:
-        print("\n[WARNING] Server started but agent initialization failed")
+        print("\n[WARNING] Server started but session manager initialization failed")
         print("    Please check your .env configuration")
     
     print("\n" + "="*60 + "\n")
@@ -175,8 +320,55 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "agent_ready": agent_initialized
+        "agent_ready": session_manager.manager_initialized,
+        "active_sessions": len(session_manager.sessions)
     }
+
+# 用户登录/创建会话
+@app.post("/api/login")
+async def login(request: LoginRequest):
+    """用户登录或创建新会话"""
+    try:
+        session_id, session_data = await session_manager.get_or_create_session(
+            username=request.username
+        )
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "username": session_data["username"],
+            "message": f"Welcome, {session_data['username']}!",
+            "created_at": session_data["created_at"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 获取会话信息
+@app.get("/api/session/{session_id}")
+async def get_session(session_id: str):
+    """获取会话信息"""
+    session_info = session_manager.get_session_info(session_id)
+    if not session_info:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session_info
+
+# 列出所有活动会话
+@app.get("/api/sessions")
+async def list_sessions():
+    """列出所有活动会话（管理端点）"""
+    return {
+        "total_sessions": len(session_manager.sessions),
+        "sessions": session_manager.list_active_sessions()
+    }
+
+# 删除会话
+@app.delete("/api/session/{session_id}")
+async def delete_session(session_id: str):
+    """删除指定会话"""
+    success = session_manager.delete_session(session_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"success": True, "message": "Session deleted"}
 
 # 系统状态
 @app.get("/api/status", response_model=StatusResponse)
@@ -190,14 +382,14 @@ async def get_status():
     canvas_connected = bool(canvas_url and canvas_token)
     openai_connected = bool(azure_key and openai_key)
     
-    status = "ready" if agent_initialized else "initializing"
-    message = "All systems operational" if agent_initialized else "Agent initialization in progress"
+    status = "ready" if session_manager.manager_initialized else "initializing"
+    message = f"All systems operational ({len(session_manager.sessions)} active sessions)" if session_manager.manager_initialized else "Session manager initialization in progress"
     
     return StatusResponse(
         status=status,
         canvas_connected=canvas_connected,
         openai_connected=openai_connected,
-        agent_ready=agent_initialized,
+        agent_ready=session_manager.manager_initialized,
         message=message
     )
 
@@ -211,24 +403,31 @@ async def test_endpoint(request: ChatRequest):
 # 聊天端点（HTTP）
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """处理聊天请求"""
+    """处理聊天请求（支持多用户）"""
     print(f"\n[*] Received chat request: {request.message[:50]}...")
     
-    if not agent_initialized:
-        print("[!] Agent not initialized!")
+    if not session_manager.manager_initialized:
+        print("[!] Session manager not initialized!")
         raise HTTPException(
             status_code=503,
-            detail="Agent not initialized. Please check server configuration."
+            detail="Session manager not initialized. Please check server configuration."
         )
     
     try:
-        # 生成会话 ID
-        session_id = request.session_id or datetime.now().strftime("%Y%m%d%H%M%S")
-        print(f"[*] Processing with session ID: {session_id}")
+        # 获取或创建会话
+        session_id, session_data = await session_manager.get_or_create_session(
+            session_id=request.session_id,
+            username=request.username
+        )
+        
+        print(f"[*] Processing with session ID: {session_id} (user: {session_data['username']})")
+        
+        # 获取该用户的 Agent 实例
+        user_agent = session_data["agent"]
         
         # 调用 Agent 处理请求
-        print("[*] Calling agent.run()...")
-        response = await agent.run(request.message)
+        print(f"[*] Calling agent.run() for user '{session_data['username']}'...")
+        response = await user_agent.run(request.message)
         print(f"[DEBUG] Response type: {type(response)}")
         
         # 处理 ToolResult 对象
@@ -241,8 +440,12 @@ async def chat(request: ChatRequest):
         else:
             response_str = str(response)
         
+        # 更新会话活动时间
+        session_manager.update_session_activity(session_id)
+        
         print(f"[OK] Agent response generated ({len(response_str)} chars)")
         print(f"[DEBUG] First 200 chars: {response_str[:200]}...")
+        print(f"[STATS] User '{session_data['username']}' has sent {session_data['message_count'] + 1} messages")
         
         chat_response = ChatResponse(
             response=response_str,
@@ -405,6 +608,297 @@ async def get_examples():
             }
         ]
     }
+
+
+@app.get("/api/check-index-status")
+async def check_index_status():
+    """检查 Canvas 文件与 Vector Store 索引状态"""
+    try:
+        import aiohttp
+        from pathlib import Path
+        import json
+        
+        canvas_url = os.getenv("CANVAS_URL")
+        canvas_token = os.getenv("CANVAS_ACCESS_TOKEN")
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        
+        if not canvas_url or not canvas_token:
+            return {
+                "status": "error",
+                "error": "Canvas configuration not found",
+                "details": "CANVAS_URL or CANVAS_ACCESS_TOKEN not set"
+            }
+        
+        if not openai_api_key:
+            return {
+                "status": "error",
+                "error": "OpenAI API key not found",
+                "details": "OPENAI_API_KEY not set"
+            }
+        
+        # 获取 Canvas 课程和文件
+        headers = {
+            "Authorization": f"Bearer {canvas_token}",
+            "Accept": "application/json"
+        }
+        
+        # 获取 Canvas 所有课程的所有文件（文件名列表）
+        canvas_files_by_course = {}
+        canvas_file_names = set()
+        
+        async with aiohttp.ClientSession() as session:
+            # 获取所有课程
+            async with session.get(
+                f"{canvas_url}/api/v1/courses",
+                headers=headers,
+                params={"enrollment_state": "active", "per_page": 100}
+            ) as response:
+                if response.status != 200:
+                    return {
+                        "status": "error",
+                        "error": "Failed to fetch Canvas courses",
+                        "details": f"HTTP {response.status}"
+                    }
+                courses = await response.json()
+            
+            # 获取每个课程的所有文件
+            for course in courses:
+                course_id = course['id']
+                course_name = course.get('name', f'Course {course_id}')
+                
+                # 获取该课程的所有文件（分页）
+                course_files = []
+                page = 1
+                
+                while True:
+                    async with session.get(
+                        f"{canvas_url}/api/v1/courses/{course_id}/files",
+                        headers=headers,
+                        params={"per_page": 100, "page": page}
+                    ) as response:
+                        if response.status == 200:
+                            files = await response.json()
+                            if not files:
+                                break
+                            
+                            for file in files:
+                                file_name = file.get('display_name', file.get('filename', ''))
+                                if file_name:
+                                    course_files.append(file_name)
+                                    canvas_file_names.add(f"{course_name}::{file_name}")
+                            
+                            # 检查是否还有下一页
+                            link_header = response.headers.get('Link', '')
+                            if 'rel="next"' not in link_header:
+                                break
+                            page += 1
+                        else:
+                            # 如果遇到错误（包括 403），跳过这个课程
+                            break
+                
+                if course_files:
+                    canvas_files_by_course[course_name] = course_files
+        
+        total_canvas_files = len(canvas_file_names)
+        
+        # 检查 Vector Store 状态
+        from openai import OpenAI
+        openai_client = OpenAI(api_key=openai_api_key)
+        
+        try:
+            # 从本地映射文件获取已索引的文件名
+            file_index_path = Path(__file__).parent.parent / "file_index"
+            
+            # 确保 file_index 目录存在（第一次使用时创建）
+            file_index_path.mkdir(parents=True, exist_ok=True)
+            
+            mapping_file = file_index_path / "vector_stores_mapping.json"
+            
+            indexed_file_names = set()
+            has_local_index = mapping_file.exists()
+            
+            if has_local_index:
+                with open(mapping_file, 'r', encoding='utf-8') as f:
+                    mapping = json.load(f)
+                    
+                    # 创建课程名映射：mapping中的key可能是 "课程代码_课程名"
+                    # 我们需要提取实际的课程名部分（下划线后的部分）
+                    for mapping_course_name, course_data in mapping.items():
+                        # 尝试从mapping的课程名中提取实际课程名
+                        # 格式可能是 "Fall 2025.CSE.3407.01_Fall_2025.CSE.3407.01 - Analysis of Algorithms"
+                        # 我们取下划线后的部分
+                        if '_' in mapping_course_name:
+                            actual_course_name = mapping_course_name.split('_', 1)[1]
+                        else:
+                            actual_course_name = mapping_course_name
+                        
+                        for file_info in course_data.get('files', []):
+                            # file_info['path'] 格式可能是 Windows 路径（反斜杠）或 Unix 路径（正斜杠）
+                            file_path = file_info.get('path', '')
+                            if file_path:
+                                # 先标准化路径分隔符
+                                file_path_normalized = file_path.replace('\\', '/')
+                                file_name = file_path_normalized.split('/')[-1]
+                                # 使用提取的实际课程名
+                                indexed_file_names.add(f"{actual_course_name}::{file_name}")
+            
+            # 读取无法访问的文件列表
+            inaccessible_files_set = set()
+            inaccessible_files_file = file_index_path / "inaccessible_files.json"
+            if inaccessible_files_file.exists():
+                with open(inaccessible_files_file, 'r', encoding='utf-8') as f:
+                    inaccessible_files_list = json.load(f)
+                    for item in inaccessible_files_list:
+                        course = item.get('course', '')
+                        file_name = item.get('file_name', '')
+                        if course and file_name:
+                            inaccessible_files_set.add(f"{course}::{file_name}")
+            
+            # 比较文件名集合
+            missing_files = canvas_file_names - indexed_file_names
+            
+            # 从 missing_files 中排除无法访问的文件
+            missing_files = missing_files - inaccessible_files_set
+            
+            extra_files = indexed_file_names - canvas_file_names
+            
+            # 按课程组织缺失的文件
+            missing_by_course = {}
+            for full_name in missing_files:
+                if '::' in full_name:
+                    course_name, file_name = full_name.split('::', 1)
+                    if course_name not in missing_by_course:
+                        missing_by_course[course_name] = []
+                    missing_by_course[course_name].append(file_name)
+            
+            # 判断状态
+            total_indexed_files = len(indexed_file_names)
+            missing_count = len(missing_files)
+            
+            if total_indexed_files == 0:
+                status_type = "no_index"
+                message = "No files indexed yet. First-time setup required."
+            elif missing_count > 0:
+                status_type = "partial_index"
+                message = f"{missing_count} file(s) missing from index. Update recommended."
+            else:
+                status_type = "up_to_date"
+                message = f"All {total_canvas_files} files are indexed."
+            
+            # 获取 Vector Store 信息
+            vector_stores = openai_client.vector_stores.list(limit=100)
+            vector_store_list = []
+            for vs in vector_stores.data:
+                file_count = vs.file_counts.completed if hasattr(vs, 'file_counts') else 0
+                vector_store_list.append({
+                    "id": vs.id,
+                    "name": vs.name,
+                    "file_count": file_count,
+                    "created_at": vs.created_at
+                })
+            
+            return {
+                "status": "success",
+                "index_status": status_type,
+                "message": message,
+                "details": {
+                    "canvas_courses": len(canvas_files_by_course),
+                    "canvas_files_total": total_canvas_files,
+                    "indexed_files_total": total_indexed_files,
+                    "missing_files_count": missing_count,
+                    "extra_files_count": len(extra_files),
+                    "vector_stores_count": len(vector_store_list),
+                    "has_local_index": has_local_index,
+                    "missing_by_course": {k: len(v) for k, v in missing_by_course.items()},
+                    "missing_files_sample": list(missing_files)[:10],  # 显示前10个缺失文件
+                    "vector_stores": vector_store_list[:5],
+                    "inaccessible_files_count": len(inaccessible_files_set)
+                }
+            }
+            
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": "Failed to check Vector Stores",
+                "details": str(e)
+            }
+            
+    except Exception as e:
+        print(f"[ERROR] check_index_status: {e}")
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@app.post("/api/sync-files")
+async def sync_files(background_tasks: BackgroundTasks):
+    """触发文件同步：下载 Canvas 文件并上传到 Vector Store"""
+    try:
+        # 检查是否已经有同步任务在运行
+        if hasattr(sync_files, 'is_running') and sync_files.is_running:
+            return {
+                "status": "already_running",
+                "message": "File sync is already in progress"
+            }
+        
+        # 启动后台任务
+        sync_files.is_running = True
+        background_tasks.add_task(run_file_sync)
+        
+        return {
+            "status": "started",
+            "message": "File synchronization started in background"
+        }
+        
+    except Exception as e:
+        sync_files.is_running = False
+        print(f"[ERROR] sync_files: {e}")
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+sync_files.is_running = False
+
+
+async def run_file_sync():
+    """后台运行文件同步"""
+    try:
+        print("[SYNC] Starting file synchronization...")
+        
+        # 调用 file_index_downloader 的 main 函数
+        import sys
+        from pathlib import Path
+        
+        # 添加脚本路径到 sys.path
+        script_dir = Path(__file__).parent
+        if str(script_dir) not in sys.path:
+            sys.path.insert(0, str(script_dir))
+        
+        # 导入并运行下载器（自动确认模式）
+        from file_index_downloader import main as downloader_main
+        await downloader_main(skip_download=False, course_id=None, auto_confirm=True)
+        
+        sync_files.is_running = False
+        print("[SYNC] File synchronization completed!")
+        
+    except Exception as e:
+        sync_files.is_running = False
+        print(f"[SYNC ERROR] {e}")
+        traceback.print_exc()
+
+
+@app.get("/api/sync-status")
+async def get_sync_status():
+    """获取文件同步状态"""
+    return {
+        "is_running": getattr(sync_files, 'is_running', False),
+        "timestamp": datetime.now().isoformat()
+    }
+
 
 # 静态文件服务（前端）
 try:

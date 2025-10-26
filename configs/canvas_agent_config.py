@@ -13,7 +13,6 @@ from src.tools.canvas_tools import (
     CanvasGetModuleItems,
     CanvasGetFiles,
     CanvasGetFileInfo,
-    CanvasDownloadFile,
     CanvasGetFolders,
     CanvasGetFolderFiles,
     CanvasSearchFiles,
@@ -39,7 +38,7 @@ canvas_student_agent_config = dict(
     type="general_agent",
     name="canvas_student_agent",
     description="Canvas LMS 学生助手，帮助学生管理课程、作业、讨论等",
-    model_id="gpt-4o",  # 默认使用 OpenAI GPT-4o，可替换为其他已注册模型别名
+    model_id="gpt-5",  # 使用 gpt-5 模型
     max_steps=15,
     template_path="src/agent/general_agent/prompts/general_agent.yaml",  # Prompt模板路径
     
@@ -52,7 +51,6 @@ canvas_student_agent_config = dict(
         CanvasGetModuleItems(),           # 获取模块项
         CanvasGetFiles(),                 # 获取文件列表
         CanvasGetFileInfo(),              # 获取文件详情
-        CanvasDownloadFile(),             # 下载文件
         CanvasGetFolders(),               # 获取文件夹
         CanvasGetFolderFiles(),           # 获取文件夹文件
         CanvasSearchFiles(),              # 搜索文件
