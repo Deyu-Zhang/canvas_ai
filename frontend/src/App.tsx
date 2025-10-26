@@ -411,19 +411,30 @@ const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
 
   return (
     <div className={`message ${message.type}-message`}>
-      {!isUser && (
-        <div className="message-avatar">
-          {isError ? '⚠️' : isSystem ? 'ℹ️' : '🤖'}
-        </div>
-      )}
-      <div className="message-content">
-        <div className="message-text">{message.content}</div>
-        <div className="message-time">
-          {new Date(message.timestamp).toLocaleTimeString()}
-        </div>
-      </div>
-      {isUser && (
-        <div className="message-avatar user-avatar">👤</div>
+      {isUser ? (
+        // 用户消息：头像在右侧
+        <>
+          <div className="message-content">
+            <div className="message-text">{message.content}</div>
+            <div className="message-time">
+              {new Date(message.timestamp).toLocaleTimeString()}
+            </div>
+          </div>
+          <div className="message-avatar user-avatar">👤</div>
+        </>
+      ) : (
+        // 系统/Agent消息：头像在左侧
+        <>
+          <div className="message-avatar">
+            {isError ? '⚠️' : isSystem ? 'ℹ️' : '🤖'}
+          </div>
+          <div className="message-content">
+            <div className="message-text">{message.content}</div>
+            <div className="message-time">
+              {new Date(message.timestamp).toLocaleTimeString()}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

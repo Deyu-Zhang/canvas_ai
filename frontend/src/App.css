@@ -378,7 +378,7 @@ body {
 }
 
 .user-message {
-  flex-direction: row-reverse;
+  justify-content: flex-end;
 }
 
 .user-message .message-content {
